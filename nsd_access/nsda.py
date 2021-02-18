@@ -9,10 +9,13 @@ from tqdm import tqdm
 import h5py
 import matplotlib.pyplot as plt
 import matplotlib.image as mpimg
-
+from skimage.transform import resize
+from skimage import measure
+import json
 import urllib.request
 import zipfile
 from pycocotools.coco import COCO
+from pycocotools import mask as maskUtils 
 
 from IPython import embed
 
@@ -389,6 +392,7 @@ class NSDAccess(object):
             coco = COCO(annot_file)
             coco_annot_IDs = coco.getAnnIds([subj_info['cocoId']])
             coco_annot = coco.loadAnns(coco_annot_IDs)
+            coco_annot = self.nsd_crop(coco_annot, annot_file, subj_info, info_type)
 
             if show_img:
                 self.read_images(image_index, show=True)
@@ -419,12 +423,14 @@ class NSDAccess(object):
                     coco_annot_IDs = coco_train.getAnnIds(
                         [subj_info['cocoId']])
                     coco_ann = coco_train.loadAnns(coco_annot_IDs)
+                    coco_ann = self.nsd_crop(coco_ann, self.coco_annotation_file.format(info_type, 'train2017'), subj_info, info_type)
                     coco_annot.append(coco_ann)
 
                 elif subj_info['cocoSplit'] == 'val2017':
                     coco_annot_IDs = coco_val.getAnnIds(
                         [subj_info['cocoId']])
                     coco_ann = coco_val.loadAnns(coco_annot_IDs)
+                    coco_ann = self.nsd_crop(coco_ann, self.coco_annotation_file.format(info_type, 'val2017'), subj_info, info_type)
                     coco_annot.append(coco_ann)
 
         return coco_annot
@@ -520,3 +526,67 @@ class NSDAccess(object):
                             image_cat.append(this_cat)
                 coco_cats.append(image_cat)
         return coco_cats
+        
+        def nsd_crop(self, coco_annot, annot_file, subj_info, instance_info):
+            """nsd_crop returns the coco annotations of a single image after cropping and resizing according to the nsd conventions
+        
+            Args:
+                coco_annot:  the original coco annotations that need to be cropped and resized
+                annot_file:  the original coco annotations file name
+                subj_info:  pandas series from the coco stim info file which contains cocoimgIds, cropping information, etc
+                instance_info:  Whether its coco instances or person_keypoints
+
+            Returns
+            -------
+            corrected coco annotation - according to the NSD conventions
+            coco annot, to be used in subsequent analysis steps
+            """
+            annot_file_open = open(annot_file)
+            coco = COCO(annot_file)
+            data = json.load(annot_file_open)
+            # data dict_keys(['info', 'licenses', 'images', 'annotations', 'categories'])
+            # data['images'] is a list of dicts
+            height = 0
+            width = 0
+            for item in data['images']:
+                if item['id'] == subj_info['cocoId']:
+                    height = item['height']
+                    width = item['width']
+        
+            coco_annot_corrected = coco_annot # Make a copy to be updated later
+
+            crop_dim = list(map(float, subj_info['cropBox'].strip('()').split(','))) # top, bottom, left, right
+            if instance_info == 'instances':
+                for i in range(len(coco_annot)):
+                    segmentations = []
+                    I = np.zeros((height, width))
+                    I = coco.annToMask(ann=coco_annot[i]) # Convert to binary mask
+                    # Crop the image
+                    I = I[int(0+(crop_dim[0]*height)): int(height - (crop_dim[1]*height)),
+                    int(0+(crop_dim[2]*width)): int(width - (crop_dim[3]*width))]
+                    # Resize the image
+                    I2 = resize(I, (425, 425)) 
+                    I2 = I2 > np.unique(I2).mean()
+                    I_encoded = maskUtils.encode(np.asfortranarray(I2)) # Convert to RLE
+                    bbox = maskUtils.toBbox(I_encoded).tolist() # Get bbox
+                    area = maskUtils.area(I_encoded).tolist() # Get area
+                    
+                    if coco_annot[i]['iscrowd']: # RLE format
+                        segmentations.append(I_encoded) 
+                    else: # Polygon format
+                        contours = measure.find_contours(I2, 0.5, positive_orientation='low')
+                        for contour in contours:
+                            contour = np.flip(contour, axis=1)
+                            segmentation = contour.ravel().tolist()
+                            segmentations.append(segmentation)
+        
+                    coco_annot_corrected[i]['segmentation'] = segmentations
+                    coco_annot_corrected[i]['bbox'] = bbox
+                    coco_annot_corrected[i]['area'] = area
+                    coco_annot_corrected[i]['cocoSplit'] = subj_info['cocoSplit'] # Add one more key to keep account of the split
+                    coco_annot_corrected[i]['nsdId'] = subj_info['nsdId'] # Add one more key to keep account of the nsdId
+            
+            elif instance_info == 'person_keypoints':
+                pass
+                
+        return coco_annot_corrected
