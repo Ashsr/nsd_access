@@ -16,6 +16,7 @@ import urllib.request
 import zipfile
 from pycocotools.coco import COCO
 from pycocotools import mask as maskUtils 
+import ijson
 
 from IPython import embed
 
@@ -42,6 +43,8 @@ class NSDAccess(object):
 
         self.coco_annotation_file = op.join(
             self.nsd_folder, 'nsddata_stimuli', 'stimuli', 'nsd', 'annotations', '{}_{}.json')
+        self.coco_corrected_annotation_file = op.join(
+            self.nsd_folder, 'nsddata_stimuli', 'stimuli', 'nsd', 'annotations', 'nsd_corrected_coco_instances.json')
 
     def download_coco_annotation_file(self, url='http://images.cocodataset.org/annotations/annotations_trainval2017.zip'):
         """download_coco_annotation_file downloads and extracts the relevant annotations files
@@ -527,43 +530,35 @@ class NSDAccess(object):
                 coco_cats.append(image_cat)
         return coco_cats
         
-        def nsd_crop(self, coco_annot, annot_file, subj_info, instance_info):
-            """nsd_crop returns the coco annotations of a single image after cropping and resizing according to the nsd conventions
+    def nsd_crop(self, coco_annot, annot_file, subj_info, instance_info):
+        """nsd_crop returns the coco annotations of a single image after cropping and resizing according to the nsd conventions
         
-            Args:
+        Args:
                 coco_annot:  the original coco annotations that need to be cropped and resized
                 annot_file:  the original coco annotations file name
                 subj_info:  pandas series from the coco stim info file which contains cocoimgIds, cropping information, etc
                 instance_info:  Whether its coco instances or person_keypoints
 
-            Returns
+        Returns
             -------
             corrected coco annotation - according to the NSD conventions
             coco annot, to be used in subsequent analysis steps
             """
-            annot_file_open = open(annot_file)
+        coco_annot_corrected = coco_annot # Make a copy to be updated later
+        if instance_info == 'instances':
             coco = COCO(annot_file)
-            data = json.load(annot_file_open)
-            # data dict_keys(['info', 'licenses', 'images', 'annotations', 'categories'])
-            # data['images'] is a list of dicts
-            height = 0
-            width = 0
-            for item in data['images']:
-                if item['id'] == subj_info['cocoId']:
-                    height = item['height']
-                    width = item['width']
-        
-            coco_annot_corrected = coco_annot # Make a copy to be updated later
-
-            crop_dim = list(map(float, subj_info['cropBox'].strip('()').split(','))) # top, bottom, left, right
-            if instance_info == 'instances':
+            if not os.path.isfile(self.coco_corrected_annotation_file):
+                print('Corrected annotation file not found - using function to correct annotations')
+                crop_dim = list(map(float, subj_info['cropBox'].strip('()').split(','))) # top, bottom, left, right
+           
                 for i in range(len(coco_annot)):
                     segmentations = []
-                    I = np.zeros((height, width))
                     I = coco.annToMask(ann=coco_annot[i]) # Convert to binary mask
+                    height = I.shape[0]
+                    width = I.shape[1]
                     # Crop the image
                     I = I[int(0+(crop_dim[0]*height)): int(height - (crop_dim[1]*height)),
-                    int(0+(crop_dim[2]*width)): int(width - (crop_dim[3]*width))]
+                            int(0+(crop_dim[2]*width)): int(width - (crop_dim[3]*width))]
                     # Resize the image
                     I2 = resize(I, (425, 425)) 
                     I2 = I2 > np.unique(I2).mean()
@@ -572,7 +567,7 @@ class NSDAccess(object):
                     area = maskUtils.area(I_encoded).tolist() # Get area
                     
                     if coco_annot[i]['iscrowd']: # RLE format
-                        segmentations.append(I_encoded) 
+                        segmentations = I_encoded
                     else: # Polygon format
                         contours = measure.find_contours(I2, 0.5, positive_orientation='low')
                         for contour in contours:
@@ -584,9 +579,16 @@ class NSDAccess(object):
                     coco_annot_corrected[i]['bbox'] = bbox
                     coco_annot_corrected[i]['area'] = area
                     coco_annot_corrected[i]['cocoSplit'] = subj_info['cocoSplit'] # Add one more key to keep account of the split
-                    coco_annot_corrected[i]['nsdId'] = subj_info['nsdId'] # Add one more key to keep account of the nsdId
-            
-            elif instance_info == 'person_keypoints':
-                pass
-                
+                    coco_annot_corrected[i]['nsdId'] = int(subj_info['nsdId']) # Add one more key to keep account of the nsdId
+
+            else:
+                image_index = int(subj_info['nsdId']) # get nsd ID
+                f = open(self.coco_corrected_annotation_file) # open the corrected annotation file 
+                for item in ijson.items(f, "item"):
+                    if item[0]['nsdId'] == image_index: # get the appropriate list of annotations
+                        req_data = item
+                        break
+                coco_annot_corrected = req_data
+                    
+                # Correction for keypoints is not yet done
         return coco_annot_corrected
